@@ -55,8 +55,8 @@ asyncio
 ### 1. 获取代码
 
 ```bash
-git clone <your-repo-url>
-cd <project-dir>
+git clone https://github.com/Soffd/yunhubot-websdk.git
+cd yunhubot-websdk
 ```
 
 ### 2. 安装依赖
