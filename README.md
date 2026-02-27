@@ -44,7 +44,8 @@
 - 依赖库：
 
 ```
-aiohttp>=3.9
+aiohttp
+asyncio
 ```
 
 ---
@@ -68,6 +69,7 @@ source venv/bin/activate        # Linux / macOS
 # venv\Scripts\activate         # Windows
 
 pip install aiohttp
+pip install asyncio
 ```
 
 ### 3. 配置 Token
