@@ -113,7 +113,7 @@ python run.py
 
 ### 5. 填写 Webhook 地址
 
-将 `http://<你的服务器IP>:8080/webhook` 填入 [云湖官网控制台](https://chat.jwzhd.com) 机器人配置页面，保存即可开始接收消息。
+将 `http://<你的服务器IP>:8080/webhook` 填入 [云湖官网控制台](https://www.yhchat.com/control) 机器人配置页面，保存即可开始接收消息。
 
 ---
 
