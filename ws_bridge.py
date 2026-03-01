@@ -70,7 +70,7 @@ class YunhuWSBridge:
             if token != self.auth_token:
                 raise web.HTTPUnauthorized(text="Invalid WS token")
 
-        ws = web.WebSocketResponse(heartbeat=30)
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=100 * 1024 * 1024)  # 100 MB，支持大文件传输，但是现在云湖 API 不支持大文件上传
         await ws.prepare(request)
         self._connections.add(ws)
         logger.info(f"新 WS 连接: {request.remote}，当前连接数: {len(self._connections)}")
@@ -154,23 +154,33 @@ class YunhuWSBridge:
             elif action == "send_image":
                 image_key = data.get("image_key", "")
                 if not image_key and data.get("image_data"):
-                    # base64 编码的文件内容（来自远程 AstrBot Docker 节点）
+                    # base64 编码的文件内容写临时文件再上传，避免超大 bytes body 触发 413
                     raw_bytes = base64.b64decode(data["image_data"])
                     filename = data.get("filename", "image.png")
-                    resp = await self.client.upload_image_bytes(raw_bytes, filename)
-                    if resp.ok and resp.data:
+                    suffix = os.path.splitext(filename)[-1] or ".png"
+                    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(raw_bytes)
+                        resp = await self.client.upload_image(tmp_path)
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                    if resp.code == 1 and resp.data:
                         image_key = resp.data.get("imageKey", "")
                     else:
                         self.webhook.append_log("error", "send_image_fail",
                             f"Base64 图片上传失败: code={resp.code} {resp.msg}",
                             {"resp_code": resp.code, "resp_msg": resp.msg})
                 elif not image_key and data.get("download_url"):
-                    # 远程 HTTP URL：在 SDK 侧下载再上传
+                    # 在 SDK 侧下载再上传
                     tmp_path = await _download_tmp(data["download_url"])
                     if tmp_path:
                         resp = await self.client.upload_image(tmp_path)
                         os.unlink(tmp_path)
-                        if resp.ok and resp.data:
+                        if resp.code == 1 and resp.data:
                             image_key = resp.data.get("imageKey", "")
                 elif not image_key and data.get("upload_path"):
                     resp = await self.client.upload_image(data["upload_path"])
@@ -190,11 +200,16 @@ class YunhuWSBridge:
                     raw_bytes = base64.b64decode(data["file_data"])
                     filename = data.get("filename", "file.bin")
                     fd, tmp_path = tempfile.mkstemp(suffix=os.path.splitext(filename)[-1] or ".bin")
-                    with os.fdopen(fd, "wb") as f:
-                        f.write(raw_bytes)
-                    resp = await self.client.upload_file(tmp_path)
-                    os.unlink(tmp_path)
-                    if resp.ok and resp.data:
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(raw_bytes)
+                        resp = await self.client.upload_file(tmp_path)
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                    if resp.code == 1 and resp.data:
                         file_key = resp.data.get("fileKey", "")
                     else:
                         self.webhook.append_log("error", "send_file_fail",
@@ -205,7 +220,7 @@ class YunhuWSBridge:
                     if tmp_path:
                         resp = await self.client.upload_file(tmp_path)
                         os.unlink(tmp_path)
-                        if resp.ok and resp.data:
+                        if resp.code == 1 and resp.data:
                             file_key = resp.data.get("fileKey", "")
                 elif not file_key and data.get("upload_path"):
                     resp = await self.client.upload_file(data["upload_path"])
@@ -225,11 +240,16 @@ class YunhuWSBridge:
                     raw_bytes = base64.b64decode(data["video_data"])
                     filename = data.get("filename", "video.mp4")
                     fd, tmp_path = tempfile.mkstemp(suffix=os.path.splitext(filename)[-1] or ".mp4")
-                    with os.fdopen(fd, "wb") as f:
-                        f.write(raw_bytes)
-                    resp = await self.client.upload_video(tmp_path)
-                    os.unlink(tmp_path)
-                    if resp.ok and resp.data:
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            f.write(raw_bytes)
+                        resp = await self.client.upload_video(tmp_path)
+                    finally:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                    if resp.code == 1 and resp.data:
                         video_key = resp.data.get("videoKey", "")
                     else:
                         self.webhook.append_log("error", "send_video_fail",
@@ -240,7 +260,7 @@ class YunhuWSBridge:
                     if tmp_path:
                         resp = await self.client.upload_video(tmp_path)
                         os.unlink(tmp_path)
-                        if resp.ok and resp.data:
+                        if resp.code == 1 and resp.data:
                             video_key = resp.data.get("videoKey", "")
                 elif not video_key and data.get("upload_path"):
                     resp = await self.client.upload_video(data["upload_path"])

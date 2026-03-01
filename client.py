@@ -4,6 +4,7 @@
 封装所有云湖开放平台接口
 """
 import asyncio
+import os
 import aiohttp
 import logging
 from typing import Optional, Union
@@ -20,15 +21,27 @@ BASE_URL = "https://chat-go.jwzhd.com/open-apis/v1"
 class YunhuClient:
     """云湖机器人 API 客户端"""
 
-    def __init__(self, token: str, timeout: int = 10):
+    def __init__(self, token: str, timeout: int = 10, upload_timeout: int = 120):
         self.token = token
+        # 普通 API 请求超时（发消息、查消息等）
         self.timeout = aiohttp.ClientTimeout(total=timeout)
+        # 上传专用超时，视频/文件可能较大，需要更长时间
+        self.upload_timeout = aiohttp.ClientTimeout(
+            total=upload_timeout,
+            connect=10,
+            sock_connect=10,
+            sock_read=upload_timeout,
+        )
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(timeout=self.timeout)
         return self._session
+
+    async def _get_upload_session(self) -> aiohttp.ClientSession:
+        """上传操作使用独立的长超时 Session，避免影响普通 API 调用"""
+        return aiohttp.ClientSession(timeout=self.upload_timeout)
 
     async def close(self):
         if self._session and not self._session.closed:
@@ -165,64 +178,106 @@ class YunhuClient:
         return await self._get("/bot/messages", params)
 
     #上传接口
+    @staticmethod
+    def _guess_mime(filename: str) -> str:
+        """根据文件名后缀猜测 MIME type"""
+        ext = os.path.splitext(filename)[-1].lower()
+        return {
+            # 图片
+            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".png": "image/png",  ".gif": "image/gif",
+            ".webp": "image/webp", ".bmp": "image/bmp",
+            # 视频
+            ".mp4": "video/mp4", ".mov": "video/quicktime",
+            ".avi": "video/x-msvideo", ".mkv": "video/x-matroska",
+            ".flv": "video/x-flv", ".webm": "video/webm",
+        }.get(ext, "application/octet-stream")
+
     async def upload_image(self, image_path: str) -> ApiResponse:
         """上传图片，返回 imageKey"""
-        session = await self._get_session()
         url = f"{BASE_URL}/image/upload?token={self.token}"
-        try:
-            with open(image_path, "rb") as f:
-                form = aiohttp.FormData()
-                form.add_field("image", f, filename=image_path.split("/")[-1])
-                async with session.post(url, data=form) as resp:
-                    result = await resp.json()
-                    return ApiResponse(**result)
-        except Exception as e:
-            logger.error(f"Upload image failed: {e}")
-            return ApiResponse(code=-1, msg=str(e), data=None)
+        async with await self._get_upload_session() as session:
+            try:
+                filename = image_path.split("/")[-1]
+                mime = self._guess_mime(filename)
+                with open(image_path, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("image", f, filename=filename, content_type=mime)
+                    async with session.post(url, data=form) as resp:
+                        if resp.status == 413:
+                            return ApiResponse(code=-1, msg="上传文件过大 (413)", data=None)
+                        result = await resp.json(content_type=None)
+                        return ApiResponse(**result)
+            except asyncio.TimeoutError:
+                logger.error("Upload image failed: 上传超时，请检查网络或增大 upload_timeout")
+                return ApiResponse(code=-1, msg="上传超时", data=None)
+            except Exception as e:
+                logger.error(f"Upload image failed: {e}")
+                return ApiResponse(code=-1, msg=str(e), data=None)
 
     async def upload_image_bytes(self, data: bytes, filename: str = "image.png") -> ApiResponse:
         """上传图片字节，返回 imageKey"""
-        session = await self._get_session()
         url = f"{BASE_URL}/image/upload?token={self.token}"
-        try:
-            form = aiohttp.FormData()
-            form.add_field("image", data, filename=filename)
-            async with session.post(url, data=form) as resp:
-                result = await resp.json()
-                return ApiResponse(**result)
-        except Exception as e:
-            logger.error(f"Upload image bytes failed: {e}")
-            return ApiResponse(code=-1, msg=str(e), data=None)
+        async with await self._get_upload_session() as session:
+            try:
+                mime = self._guess_mime(filename)
+                form = aiohttp.FormData()
+                form.add_field("image", data, filename=filename, content_type=mime)
+                async with session.post(url, data=form) as resp:
+                    if resp.status == 413:
+                        return ApiResponse(code=-1, msg="上传文件过大 (413)", data=None)
+                    result = await resp.json(content_type=None)
+                    return ApiResponse(**result)
+            except asyncio.TimeoutError:
+                logger.error("Upload image bytes failed: 上传超时")
+                return ApiResponse(code=-1, msg="上传超时", data=None)
+            except Exception as e:
+                logger.error(f"Upload image bytes failed: {e}")
+                return ApiResponse(code=-1, msg=str(e), data=None)
 
     async def upload_file(self, file_path: str) -> ApiResponse:
         """上传文件，返回 fileKey"""
-        session = await self._get_session()
         url = f"{BASE_URL}/file/upload?token={self.token}"
-        try:
-            with open(file_path, "rb") as f:
-                form = aiohttp.FormData()
-                form.add_field("file", f, filename=file_path.split("/")[-1])
-                async with session.post(url, data=form) as resp:
-                    result = await resp.json()
-                    return ApiResponse(**result)
-        except Exception as e:
-            logger.error(f"Upload file failed: {e}")
-            return ApiResponse(code=-1, msg=str(e), data=None)
+        async with await self._get_upload_session() as session:
+            try:
+                filename = file_path.split("/")[-1]
+                with open(file_path, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("file", f, filename=filename,
+                                   content_type="application/octet-stream")
+                    async with session.post(url, data=form) as resp:
+                        if resp.status == 413:
+                            return ApiResponse(code=-1, msg="上传文件过大 (413)", data=None)
+                        result = await resp.json(content_type=None)
+                        return ApiResponse(**result)
+            except asyncio.TimeoutError:
+                logger.error("Upload file failed: 上传超时，请检查网络或增大 upload_timeout")
+                return ApiResponse(code=-1, msg="上传超时", data=None)
+            except Exception as e:
+                logger.error(f"Upload file failed: {e}")
+                return ApiResponse(code=-1, msg=str(e), data=None)
 
     async def upload_video(self, video_path: str) -> ApiResponse:
         """上传视频，返回 videoKey"""
-        session = await self._get_session()
         url = f"{BASE_URL}/video/upload?token={self.token}"
-        try:
-            with open(video_path, "rb") as f:
-                form = aiohttp.FormData()
-                form.add_field("video", f, filename=video_path.split("/")[-1])
-                async with session.post(url, data=form) as resp:
-                    result = await resp.json()
-                    return ApiResponse(**result)
-        except Exception as e:
-            logger.error(f"Upload video failed: {e}")
-            return ApiResponse(code=-1, msg=str(e), data=None)
+        async with await self._get_upload_session() as session:
+            try:
+                filename = video_path.split("/")[-1]
+                mime = self._guess_mime(filename) 
+                with open(video_path, "rb") as f:
+                    form = aiohttp.FormData()
+                    form.add_field("video", f, filename=filename, content_type=mime)
+                    async with session.post(url, data=form) as resp:
+                        if resp.status == 413:
+                            return ApiResponse(code=-1, msg="上传文件过大 (413)", data=None)
+                        result = await resp.json(content_type=None)
+                        return ApiResponse(**result)
+            except asyncio.TimeoutError:
+                logger.error("Upload video failed: 上传超时，请检查网络或增大 upload_timeout（当前默认 120s）")
+                return ApiResponse(code=-1, msg="上传超时", data=None)
+            except Exception as e:
+                logger.error(f"Upload video failed: {e}")
+                return ApiResponse(code=-1, msg=str(e), data=None)
 
     #看板接口
 

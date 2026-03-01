@@ -37,7 +37,13 @@ class InMemoryLogHandler(logging.Handler):
             datefmt="%H:%M:%S"
         ))
 
+    # 需要过滤掉的 logger 名称（通常产生大量低价值的 HTTP 访问日志）
+    _NOISY_LOGGERS = {"aiohttp.access", "aiohttp.server"}
+
     def emit(self, record: logging.LogRecord):
+        # 过滤 aiohttp HTTP 访问日志（INFO 级别），这类日志量大且价值低
+        if record.name in self._NOISY_LOGGERS and record.levelno <= logging.INFO:
+            return
         line = self.format(record)
         entry = {
             "t": int(record.created * 1000),
@@ -238,10 +244,38 @@ WEBUI_HTML = r"""<!DOCTYPE html>
   .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
   .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
   @media(max-width:900px){.grid-2,.grid-3{grid-template-columns:1fr}}
-  @media(max-width:768px){.layout{grid-template-columns:1fr}.sidebar{display:none}}
+  @media(max-width:768px){
+    .layout{grid-template-columns:1fr}
+    .sidebar{
+      display:flex;position:fixed;top:0;left:0;bottom:0;z-index:1000;
+      transform:translateX(-100%);transition:transform .25s ease;width:240px;
+    }
+    .sidebar.open{transform:translateX(0)}
+    .sidebar-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:999}
+    .sidebar-overlay.open{display:block}
+    .mobile-header{
+      display:flex;align-items:center;gap:12px;
+      background:var(--surface);border-bottom:1px solid var(--border);
+      padding:12px 16px;position:sticky;top:0;z-index:100;
+    }
+    .hamburger{background:none;border:none;cursor:pointer;padding:4px;color:var(--text);font-size:22px;line-height:1}
+    .mobile-title{font-size:16px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .main{padding:16px}
+  }
+  @media(min-width:769px){
+    .mobile-header{display:none}
+    .sidebar-overlay{display:none!important}
+  }
 </style>
 </head>
 <body>
+<!-- 手机端顶部栏 -->
+<div class="mobile-header">
+  <button class="hamburger" onclick="toggleSidebar()" aria-label="菜单">☰</button>
+  <span class="mobile-title">☁ 云湖 SDK</span>
+</div>
+<!-- 手机端侧栏遮罩 -->
+<div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
 <div class="layout">
   <!-- Sidebar -->
   <aside class="sidebar">
@@ -284,7 +318,7 @@ WEBUI_HTML = r"""<!DOCTYPE html>
       <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-value" id="statStatus">—</div>
-          <div class="stat-label">连接状态</div>
+          <div class="stat-label">服务状态</div>
         </div>
         <div class="stat-card">
           <div class="stat-value" id="statRecv">0</div>
@@ -310,8 +344,8 @@ WEBUI_HTML = r"""<!DOCTYPE html>
       <div class="card">
         <div class="card-title">🚀 快速开始</div>
         <p style="color:var(--text2);font-size:13px;line-height:1.9">
-          1. 前往 <b style="color:var(--text)">配置</b> 页填入机器人 Token 并保存<br>
-          2. 前往 <b style="color:var(--text)">Webhook / WS</b> 页，将 Webhook URL 填入云湖控制台<br>
+          1. 前往 <b style="color:var(--text)">配置</b> 页填入机器人 Token，点击「保存 Token」，再点「测试连接」确认可用<br>
+          2. 前往 <b style="color:var(--text)">Webhook / WS</b> 页，复制 Webhook 地址填入云湖控制台「消息订阅 URL」<br>
           3. 在 <b style="color:var(--text)">事件日志</b> 页实时查看收发消息与报错<br>
           4. 在 <b style="color:var(--text)">运行日志</b> 页查看进程实时输出
         </p>
@@ -383,7 +417,7 @@ WEBUI_HTML = r"""<!DOCTYPE html>
         <p style="color:var(--text2);font-size:12px;margin-bottom:12px">⚠ 标 ★ 项修改后需点击重启才能生效</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="saveAllConfig()">💾 保存配置</button>
-          <button class="btn btn-warn" onclick="restartService()">🔄 保存并重启</button>
+          <button class="btn btn-warn" onclick="saveAndRestart()">🔄 保存并重启</button>
         </div>
       </div>
     </div>
@@ -532,6 +566,16 @@ const MAX_RUN_LINES = 500;
 let logLevelFilter = 'ALL';
 const LEVEL_ORDER = {DEBUG:10, INFO:20, WARNING:30, ERROR:40, CRITICAL:50};
 
+// 手机端侧栏
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.getElementById('sidebarOverlay').classList.toggle('open');
+}
+function closeSidebar() {
+  document.querySelector('.sidebar').classList.remove('open');
+  document.getElementById('sidebarOverlay').classList.remove('open');
+}
+
 // 导航
 function nav(el) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -542,6 +586,7 @@ function nav(el) {
   if (page === 'events') refreshEvents();
   if (page === 'overview') refreshOverview();
   if (page === 'runlog') ensureSSE();
+  closeSidebar();
 }
 
 // 配置
@@ -555,16 +600,28 @@ async function loadConfig() {
   document.getElementById('inputWsToken').value = config.ws_token || '';
   document.getElementById('inputWebuiPort').value = config.webui_port || 8081;
   document.getElementById('inputWebuiPassword').value = config.webui_password || '';
-  updateUrls();
+  await updateUrls();
 }
 
-function updateUrls() {
+async function updateUrls() {
   const wport = config.webhook_port || 8080;
   const wpath = config.webhook_path || '/webhook';
   const wspath = config.ws_path || '/ws';
   const wstoken = config.ws_token || '';
-  document.getElementById('webhookUrl').textContent = `http://YOUR_SERVER_IP:${wport}${wpath}`;
-  let wsUrl = `ws://YOUR_SERVER_IP:${wport}${wspath}`;
+
+  // 尝试获取服务器真实 IP
+  let serverIp = null;
+  try {
+    const r = await fetch('/api/server-info');
+    if (r.ok) {
+      const info = await r.json();
+      serverIp = info.ip || null;
+    }
+  } catch(e) {}
+
+  const ipStr = serverIp || 'YOUR_SERVER_IP';
+  document.getElementById('webhookUrl').textContent = `http://${ipStr}:${wport}${wpath}`;
+  let wsUrl = `ws://${ipStr}:${wport}${wspath}`;
   if (wstoken) wsUrl += `?token=${wstoken}`;
   document.getElementById('wsUrl').textContent = wsUrl;
 }
@@ -627,18 +684,30 @@ async function saveAllConfig() {
   const data = await res.json();
   if (data.ok) {
     Object.assign(config, cfg);
-    updateUrls();
+    await updateUrls();
     showAlert('configAlert','success','配置已保存，标 ★ 项需重启生效');
   } else showAlert('configAlert','error', data.msg);
 }
 
 function copyText(id) {
-  navigator.clipboard.writeText(document.getElementById(id).textContent).then(() => {
-    const el = document.getElementById(id).nextElementSibling;
-    const orig = el.textContent;
-    el.textContent = '✓ 已复制';
-    setTimeout(() => el.textContent = orig, 2000);
-  });
+  const text = document.getElementById(id).textContent.trim();
+  const btn = document.getElementById(id).nextElementSibling;
+  const orig = btn.textContent;
+  const doSuccess = () => { btn.textContent = '✓ 已复制'; setTimeout(() => btn.textContent = orig, 2000); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(doSuccess).catch(() => fallbackCopy(text, doSuccess));
+  } else {
+    fallbackCopy(text, doSuccess);
+  }
+}
+function fallbackCopy(text, cb) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.appendChild(ta);
+  ta.focus(); ta.select();
+  try { document.execCommand('copy'); cb(); } catch(e) {}
+  document.body.removeChild(ta);
 }
 
 // 发送消息
@@ -818,15 +887,93 @@ async function restartService() {
   try {
     await fetch('/api/restart', {method:'POST'});
   } catch(e) {}
-  // 等待服务重启后刷新页面
+  // 等待服务重启后刷新页面。
+  // 注意：重启后新进程的内存会话表被清空，/api/status 可能返回 401（需重新登录）。
+  // 因此只要收到任何 HTTP 响应（包括 401）就说明服务已恢复，立即刷新页面让用户重新登录。
+  let serverWasDown = false;
   setTimeout(() => {
     const check = setInterval(async () => {
       try {
         const r = await fetch('/api/status');
-        if (r.ok) { clearInterval(check); location.reload(); }
-      } catch(e) {}
-    }, 1500);
-  }, 2000);
+        // 必须先确认服务曾经中断，再收到响应才算真正重启完毕
+        if (serverWasDown && (r.status === 200 || r.status === 401)) {
+          clearInterval(check);
+          location.reload();
+        }
+      } catch(e) {
+        // 服务还在重启中，标记下线
+        serverWasDown = true;
+      }
+    }, 800);
+  }, 800);
+}
+
+// 先保存配置，再重启
+async function saveAndRestart() {
+  if (!confirm('确认要保存配置并重启服务吗？期间 Webhook 将短暂中断。')) return;
+
+  // 收集当前表单内容
+  const cfg = {
+    ...config,
+    token: document.getElementById('inputToken').value.trim(),
+    webhook_port: parseInt(document.getElementById('inputWebhookPort').value) || 8080,
+    webhook_path: document.getElementById('inputWebhookPath').value || '/webhook',
+    ws_path: document.getElementById('inputWsPath').value || '/ws',
+    ws_token: document.getElementById('inputWsToken').value,
+    webui_port: parseInt(document.getElementById('inputWebuiPort').value) || 8081,
+    webui_password: document.getElementById('inputWebuiPassword').value,
+  };
+
+  // 先保存
+  const saveRes = await fetch('/api/config', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(cfg)
+  }).catch(() => null);
+
+  if (!saveRes || !saveRes.ok) {
+    showAlert('configAlert','error','配置保存失败，已取消重启');
+    return;
+  }
+  const saveData = await saveRes.json();
+  if (!saveData.ok) {
+    showAlert('configAlert','error', `配置保存失败：${saveData.msg}`);
+    return;
+  }
+  Object.assign(config, cfg);
+
+  // 保存成功后再重启
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 保存并重启中...';
+  try {
+    await fetch('/api/restart', {method:'POST'});
+  } catch(e) {}
+
+  // 重启后如果 webui_port 发生了变化，需要跳转到新端口
+  const newPort = cfg.webui_port || 8081;
+  const currentPort = parseInt(location.port) || 80;
+
+  let serverWasDown = false;
+  setTimeout(() => {
+    const check = setInterval(async () => {
+      try {
+        const r = await fetch('/api/status');
+        // 只有确认服务曾经中断后，再收到响应才算真正重启完毕
+        if (serverWasDown && (r.status === 200 || r.status === 401)) {
+          clearInterval(check);
+          if (newPort !== currentPort) {
+            // 端口变了，跳转到新端口
+            location.href = `${location.protocol}//${location.hostname}:${newPort}/`;
+          } else {
+            location.reload();
+          }
+        }
+      } catch(e) {
+        // 服务正在重启，标记下线
+        serverWasDown = true;
+      }
+    }, 800);
+  }, 800);
 }
 
 // 测试 Webhook
@@ -851,14 +998,24 @@ function showTestEventResult(ok, msg) {
 }
 
 // 概览
-async function refreshOverview() {
+function updateUptime() {
   const elapsed = Math.floor((Date.now()-startTime)/1000);
   const h=Math.floor(elapsed/3600),m=Math.floor((elapsed%3600)/60),s=elapsed%60;
-  document.getElementById('statUptime').textContent = h?`${h}h ${m}m`:m?`${m}m ${s}s`:`${s}s`;
+  document.getElementById('statUptime').textContent = h?`${h}h ${m}m ${s}s`:m?`${m}m ${s}s`:`${s}s`;
+}
+
+async function refreshOverview() {
+  updateUptime();
   const res = await fetch('/api/status').catch(()=>null);
   if(res && res.ok){
     const st = await res.json();
     document.getElementById('statWsConn').textContent = st.ws_connections ?? '—';
+    // 服务能响应即表示运行中；Token 是否有效需要手动测试
+    const statusEl = document.getElementById('statStatus');
+    if (statusEl.textContent === '—') {
+      statusEl.textContent = '运行中';
+      document.getElementById('navDot').classList.add('online');
+    }
   }
   await refreshEvents();
 }
@@ -876,11 +1033,25 @@ loadConfig();
 initRunLog();
 startAutoRefresh();
 setInterval(refreshOverview, 5000);
+setInterval(updateUptime, 1000);
 // 启动后也连接 SSE（供后台接收日志，切换到运行日志页时显示）
 reconnectSSE();
 </script>
 </body>
 </html>"""
+
+
+def _detect_server_ip() -> str:
+    """尝试探测服务器对外的 IP 地址"""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
 
 
 class YunhuWebUI:
@@ -1067,6 +1238,16 @@ class YunhuWebUI:
         except Exception as e:
             return web.json_response({"ok": False, "msg": str(e)})
 
+    async def _handle_server_info(self, request: web.Request) -> web.Response:
+        """返回服务器 IP 及端口信息，用于 WebUI 显示真实地址"""
+        ip = _detect_server_ip()
+        return web.json_response({
+            "ip": ip,
+            "webhook_port": self.config.get("webhook_port", 8080),
+            "webhook_path": self.config.get("webhook_path", "/webhook"),
+            "ws_path": self.config.get("ws_path", "/ws"),
+        })
+
     async def _handle_status(self, request: web.Request) -> web.Response:
         ws_conn = self.bridge.connection_count if self.bridge else 0
         return web.json_response({
@@ -1144,6 +1325,7 @@ class YunhuWebUI:
         app.router.add_get("/api/events", self._handle_get_events)
         app.router.add_post("/api/events/clear", self._handle_clear_events)
         app.router.add_post("/api/test-event", self._handle_test_event)
+        app.router.add_get("/api/server-info", self._handle_server_info)
         app.router.add_get("/api/status", self._handle_status)
         # 运行日志
         app.router.add_get("/api/logs", self._handle_get_logs)
